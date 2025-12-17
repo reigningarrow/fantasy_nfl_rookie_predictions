@@ -7,69 +7,171 @@ Original file is located at
     https://colab.research.google.com/drive/10ZOG7d7GVhsR0KBYP8cNW85kTL6EUDdR
 """
 
-import zipfile
+import scipy.stats as st
+from xgboost import XGBRegressor, XGBClassifier
+from sklearn.experimental import enable_halving_search_cv
+from sklearn.model_selection import HalvingGridSearchCV, HalvingRandomSearchCV
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import RandomForestClassifier
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.inspection import permutation_importance
+import torch
+import os
+os.environ["KERAS_BACKEND"] = "torch"
+import keras
+from keras import layers, callbacks,optimizers
+from sklearn.metrics import mean_squared_error, mean_absolute_error, root_mean_squared_error, r2_score
+from sklearn.svm import SVR
+from sklearn.ensemble import  RandomForestRegressor
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 import os
 import pandas as pd
 import numpy as np
 import time
 
-#time.sleep(600)
-if not os.path.exists('/content/cfb_nfl/'):
-  with zipfile.ZipFile('/content/cfb_nfl.zip', 'r') as zip_ref:
-      zip_ref.extractall('/content/')
-os.chdir('/content/')
-
 combine_df = pd.DataFrame()
 dir = 'cfb_combine/'
 for f in os.listdir(dir):
-  if f.endswith('.csv'):
-    tmp = pd.read_csv(dir+f)
-    combine_df= pd.concat([combine_df,tmp])
+    if f.endswith('.csv'):
+        tmp = pd.read_csv(dir+f)
+        combine_df = pd.concat([combine_df, tmp])
 
 
-combine_df = combine_df[combine_df['position'].isin(['QB','WR','RB','FB','TE'])]
-combine_df.dropna(subset=['player','yr'],inplace=True)
+combine_df = combine_df[combine_df['position'].isin(
+    ['QB', 'WR', 'RB', 'FB', 'TE'])]
+
+combine_df.dropna(subset=['player', 'yr'], inplace=True)
 combine_df['yr'] = combine_df['yr'].astype(int)
-combine_df.reset_index(inplace=True,drop=True)
+combine_df.reset_index(inplace=True, drop=True)
 
 
-combine_df.fillna({'40yd':100, 'Vertical':0, 'Bench':0, 'Broad Jump':0,
-                   '3Cone':100, 'Shuttle':100},inplace=True)
-display(combine_df.head())
+combine_df.fillna({'40yd': 100, 'Vertical': 0, 'Bench': 0, 'Broad Jump': 0,
+                   '3Cone': 100, 'Shuttle': 100}, inplace=True)
+
+
+def college_score(df):
+    scores = []
+    for i, row in df.iterrows():
+        pass_score = row['passing_yards']/25 + \
+            row['pass_td']*6+row['ints_thrown']*-2
+
+        if row['passing_yards'] >= 300:
+            pass_score += 2
+        if row['passing_yards'] >= 400:
+            pass_score += 2
+
+        rush_score = row['rush_yards']/10+row['rush_td']*6
+        if row['rush_yards'] >= 100:
+            rush_score += 2
+        if row['rush_yards'] >= 200:
+            rush_score += 2
+
+        rec_score = row['receptions']*0.5+row['rec_td']*6+row['rec_yards']/10
+        if row['rec_yards'] >= 100:
+            rush_score += 2
+        if row['rec_yards'] >= 200:
+            rush_score += 2
+
+        score = pass_score+rush_score+rec_score
+
+        scores.append(score)
+
+    return scores
+
+
+def plot_model_diagnostics(model, X_test, y_test, title):
+    # Predictions
+    y_pred = model.predict(X_test)
+    errors = y_pred - y_test
+
+    # Metrics
+    r2 = r2_score(y_test, y_pred)
+    rmse = root_mean_squared_error(y_test, y_pred)
+
+    # ---- Plot Layout ----
+    fig = plt.figure(figsize=(10, 10))
+    grid = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.3)
+
+    # ---------------------------------------------------------
+    # 1. TRUE vs PREDICTED SCATTER
+    # ---------------------------------------------------------
+    ax1 = fig.add_subplot(grid[0, 0])
+    ax1.scatter(y_test, y_pred,s=5,c='blue')
+    ax1.plot([y_test.min(), y_test.max()],
+             [y_test.min(), y_test.max()],
+             'r--', lw=2)
+
+    ax1.set_title(f"{title}\nTrue vs Predicted")
+    ax1.set_xlabel("True Values")
+    ax1.set_ylabel("Predicted Values")
+    ax1.grid(True)
+
+    # Add R² and RMSE annotation
+    ax1.text(
+        0.05, 0.95,
+        f"R² = {r2:.4f}\nRMSE = {rmse:.4f}",
+        transform=ax1.transAxes,
+        fontsize=12,
+        verticalalignment='top',
+        bbox=dict(boxstyle="round", fc="white", ec="black", alpha=0.7)
+    )
+
+    # ---------------------------------------------------------
+    # 2. ERROR DISTRIBUTION (Residuals)
+    # ---------------------------------------------------------
+    ax2 = fig.add_subplot(grid[1, 0])
+    sns.histplot(errors, bins=40, kde=True, ax=ax2, color='purple')
+
+    ax2.set_title("Distribution of Prediction Errors")
+    ax2.set_xlabel("Error (Predicted - True)")
+    ax2.set_ylabel("Frequency")
+    ax2.grid(True)
+
+    plt.tight_layout()
+    plt.show()
 
 college_df = pd.DataFrame()
 dir = 'cfb_data/'
 for f in os.listdir(dir):
-  if f.endswith('.csv'):
-    year = f.split('.')[0]
-    year = year.split('_')[-1]
-    tmp = pd.read_csv(dir+f)
+    if f.endswith('.csv'):
+        year = f.split('.')[0]
+        year = year.split('_')[-1]
+        tmp = pd.read_csv(dir+f)
 
-    for x in tmp.columns:
-      if 'unnamed' in x.lower():
-        tmp.drop(x,axis=1,inplace=True)
-    tmp = tmp[tmp['player'].isin(combine_df['player'].unique())]
+        for x in tmp.columns:
+            if 'unnamed' in x.lower():
+                tmp.drop(x, axis=1, inplace=True)
+        tmp = tmp[tmp['player'].isin(combine_df['player'].unique())]
+        
+        tmp['college_score'] = college_score(tmp)
 
-    college_df= pd.concat([college_df,tmp])
+        college_df = pd.concat([college_df, tmp])
 # Josh johnson is the only player who would occur for two different people in different positions
 college_df = college_df[college_df['player'] != 'Josh Johnson']
-display(college_df.head())
 
-print(f'Columns-\n{college_df.columns}')
+
+print(f'College data Columns-\n{college_df.columns}')
 
 df_total = college_df.groupby(['player']).sum(numeric_only=True)
 df_total = df_total.loc[:, ~df_total.columns.str.contains('avg')]
+df_total.drop(['pass_yards_per_attempt', 'adjusted_pass_yards_per_attempt',
+               'completion_percentage','passer_rating'],
+              axis=1, inplace=True)
 
 df_avg = college_df.groupby(['player']).median(numeric_only=True)
 df_avg = df_avg.loc[:, ~df_avg.columns.str.contains('tot_')]
-
+df_avg.drop(['total__rush_rec_tds'],axis=1,inplace=True)
 print(f'df_total columns-\n{df_total.columns}\n\n\n')
 print(f'df_avg columns-\n{df_avg.columns}\n\n')
 
-df = combine_df.merge(df_total,on='player',how='left',suffixes=('_combine','_totals'))
+df = combine_df.merge(df_total, on='player', how='left',
+                      suffixes=('_combine', '_totals'))
+
+df = df.merge(df_avg, on='player', how='left', suffixes=('_total', '_avg'))
 print(df.columns)
-df = df.merge(df_avg,on='player',how='left',suffixes=('_totals','_avg'))
-display(df.head())
 
 def calc_score(file_name):
     df = pd.read_csv(file_name, index_col=False)
@@ -111,9 +213,9 @@ def calc_score(file_name):
 
         df['score'] = scores
     else:
-      print(file_name)
-      #display(df.head())
-      #raise Exception('Invalid File')
+        print(file_name)
+        # display(df.head())
+        # raise Exception('Invalid File')
 
     return df
 
@@ -125,90 +227,84 @@ def list_files(directory):
             file_list.append(os.path.join(root, file))
     return file_list
 
+
 nfl_rookie_df = pd.DataFrame()
 dir = 'cfb_nfl/'
 all_files = list_files(dir)
 for f in all_files:
-  if f.endswith('.csv'):
-    if 'offence' in f:
-      print(f)
-      year = f.split('.')[0]
-      year = year.split('_')[-2]
-      year = int(year)
+    if f.endswith('.csv'):
+        if 'offence' in f:
+            #print(f)
+            year = f.split('.')[0]
+            year = year.split('_')[-2]
+            year = int(year)
 
-      rookies = combine_df[combine_df['yr']==year]['player'].unique()
-      tmp =calc_score(f)
-      tmp = tmp[tmp['player'].isin(rookies)]
-      #tmp['year'] = year
-      nfl_rookie_df= pd.concat([nfl_rookie_df,tmp])
-nfl_rookie_df = nfl_rookie_df[['player','score']]
+            rookies = combine_df[combine_df['yr'] == year]['player'].unique()
+            tmp = calc_score(f)
+            tmp = tmp[tmp['player'].isin(rookies)]
+            # tmp['year'] = year
+            nfl_rookie_df = pd.concat([nfl_rookie_df, tmp])
+nfl_rookie_df = nfl_rookie_df[['player', 'score']]
 nfl_rookie_df_sum = nfl_rookie_df.groupby(['player']).median(numeric_only=True)
-#nfl_rookie_df = nfl_rookie_df_sum
+# nfl_rookie_df = nfl_rookie_df_sum
 
 nfl_rookie_df_sum.reset_index(inplace=True)
-df_final = df.merge(nfl_rookie_df_sum,on='player',how='left')
-df_final.rename(columns={'score':'nfl_score'},inplace=True)
+df_final = df.merge(nfl_rookie_df_sum, on='player', how='left')
+df_final.rename(columns={'score': 'nfl_score'}, inplace=True)
 
-df_final.drop(['tm'],axis=1,inplace=True)
+df_final.drop(['tm','yr'], axis=1, inplace=True)
 
-print(df.columns)
+print(df_final.columns)
+df_final['nfl_score'] = df_final['nfl_score'].fillna(0)
 df_final = df_final.dropna(subset=['nfl_score'])
-df_final.reset_index(inplace=True,drop=True)
+df_final.reset_index(inplace=True, drop=True)
 print(f'the length of the dataframe is- {len(df_final)}')
-
 
 
 # Fill NaNs with empty strings for 'Ht' column before processing
 df_final.loc[:, 'Ht'] = df_final['Ht'].fillna('')
 
-df_final['feet'] = df_final['Ht'].apply(lambda x: int(str(x).split('-')[0]) if isinstance(x, str) and '-' in x else 0)
-df_final['inches'] = df_final['Ht'].apply(lambda x: int(str(x).split('-')[1]) if isinstance(x, str) and '-' in x else 0)
+df_final['feet'] = df_final['Ht'].apply(lambda x: int(
+    str(x).split('-')[0]) if isinstance(x, str) and '-' in x else 0)
+df_final['inches'] = df_final['Ht'].apply(lambda x: int(
+    str(x).split('-')[1]) if isinstance(x, str) and '-' in x else 0)
 df_final['feet_in_cm'] = df_final['feet'] * 30.48
 df_final['inches_in_cm'] = df_final['inches'] * 2.54
 df_final['Ht'] = df_final['feet_in_cm'] + df_final['inches_in_cm']
 
-df_final.drop(['feet','inches','feet_in_cm','inches_in_cm'],axis=1,inplace=True)
+df_final.drop(['feet', 'inches', 'feet_in_cm',
+              'inches_in_cm'], axis=1, inplace=True)
 
-display(df_final.sort_values(by='nfl_score',ascending=False).head(50))
-
-# prompt: fill in nans with 0 and normalise the data, then use ordinal encoding on the school column
-
-from sklearn.preprocessing import MinMaxScaler, OrdinalEncoder, StandardScaler
 print(df_final.columns)
-#df_final.drop('tm',axis=1,inplace=True)
 
 # Ordinal encode the 'school' column
 encoder = OrdinalEncoder()
 df_final['school'] = encoder.fit_transform(df_final[['school']])
 
-display(df_final.head())
 print(len(df_final))
 
-# prompt: are there any other preprocessing steps to be done?
-
-import pandas as pd
 # One-Hot Encode the 'position' column
-df_final = pd.get_dummies(df_final, columns=['position'], prefix='position', dummy_na=0)
+df_final = pd.get_dummies(
+    df_final, columns=['position'], prefix='position', dummy_na=0)
 
 # Check for any remaining NaN values
 print("\nChecking for remaining NaN values:")
 print(df_final.isnull().sum()[df_final.isnull().sum() > 0])
 
-display(df_final.head())
 print(len(df_final))
 df_final.columns
-play= df_final['player']
-df_extremes = pd.concat([df_final.sort_values(by='nfl_score',ascending=False).head(10),df_final.sort_values(by='nfl_score',ascending=True).head(10)])
+play = df_final['player']
+df_extremes = pd.concat([df_final.sort_values(by='nfl_score', ascending=False).head(
+    10), df_final.sort_values(by='nfl_score', ascending=True).head(10)])
 
-df_final.drop(['player','yr'],axis=1,inplace=True)
-df_final.fillna(0,inplace=True)
+df_final.drop(['player'], axis=1, inplace=True)
+df_final.fillna(0, inplace=True)
 
 """---
 
 #Split into Training/Test Data
 """
 
-from sklearn.model_selection import train_test_split
 sc = MinMaxScaler()
 
 df = df_final.copy()
@@ -219,7 +315,8 @@ df.to_csv('nfl_rookie_data.csv')
 X = df.drop('nfl_score', axis=1)
 y = df['nfl_score']
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
 
 
 # Normalize the data
@@ -233,7 +330,6 @@ X_test_no_pca = X_test
 
 """Apply PCA"""
 
-from sklearn.decomposition import PCA
 
 # Make an instance of the Model
 pca = PCA(.95)
@@ -248,21 +344,12 @@ X_test = pca.transform(X_test)
 ##PCA
 """
 
-from xgboost import XGBRegressor
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.svm import SVR
-
-# explicitly require this experimental feature
-from sklearn.experimental import enable_halving_search_cv # noqa
-# now you can import normally from model_selection
-from sklearn.model_selection import HalvingGridSearchCV
-
 # prompt: make code for all maching learning algorithms mentioned above, use the halving grid search and display the metric score for each
-from sklearn.metrics import mean_squared_error, mean_absolute_error, root_mean_squared_error
 # Define the models and their parameter grids
 models = {
     'XGBoost': {
-        'model': XGBRegressor(objective='reg:squarederror', random_state=42), # Added tree_method for GPU
+        # Added tree_method for GPU
+        'model': XGBRegressor(objective='reg:squarederror', random_state=42),
         'param_grid': {
             'n_estimators': [100, 200, 300, 400, 500, 600, 700],
             'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3],
@@ -272,7 +359,8 @@ models = {
         }
     },
     'RandomForest': {
-        'model': RandomForestRegressor(random_state=42), # Changed to Regressor
+        # Changed to Regressor
+        'model': RandomForestRegressor(random_state=42),
         'param_grid': {
             'n_estimators': [100, 200, 300, 400, 500, 600, 700],
             'max_depth': [None, 10, 15, 20, 30, 40, 50],
@@ -295,7 +383,8 @@ models = {
 scoring_metrics = {
     'mse': 'neg_mean_squared_error',
     'mae': 'neg_mean_absolute_error',
-    'rmse': 'neg_root_mean_squared_error'
+    'rmse': 'neg_root_mean_squared_error',
+    'r2' : 'r2_score'
 }
 
 # Iterate through each model
@@ -310,8 +399,9 @@ for name, config in models.items():
         factor=2,
         resource='n_samples',
         min_resources='exhaust',
-        scoring='neg_root_mean_squared_error', # Specify a single scoring metric for refitting
-        refit='neg_root_mean_squared_error' # Refit the model based on RMSE
+        # Specify a single scoring metric for refitting
+        scoring='neg_root_mean_squared_error',
+        refit='neg_root_mean_squared_error'  # Refit the model based on RMSE
     )
 
     # Fit the model
@@ -319,56 +409,61 @@ for name, config in models.items():
 
     # Display the best parameters and the best score (based on refit metric)
     print(f"Best parameters for {name}: {search.best_params_}")
-    print(f"Best RMSE score (from HalvingGridSearchCV) for {name}: {search.best_score_}")
-
+    print(f"Best RMSE score (from HalvingGridSearchCV) for {
+          name}: {search.best_score_}")
 
     # Evaluate on the test set using multiple metrics
     print(f"Test scores for {name}:")
     best_model = search.best_estimator_
     for metric_name, metric_scorer in scoring_metrics.items():
-        test_score = best_model.score(X_test, y_test) # Use the best estimator's score method
+        # Use the best estimator's score method
+        test_score = best_model.score(X_test, y_test)
 
         if metric_name == 'mse':
-          test_score = mean_squared_error(y_test, best_model.predict(X_test))
+            test_score = mean_squared_error(y_test, best_model.predict(X_test))
         elif metric_name == 'mae':
-          test_score = mean_absolute_error(y_test, best_model.predict(X_test))
+            test_score = mean_absolute_error(
+                y_test, best_model.predict(X_test))
         elif metric_name == 'rmse':
-          test_score = root_mean_squared_error(y_test, best_model.predict(X_test))
+            test_score = root_mean_squared_error(
+                y_test, best_model.predict(X_test))
+        elif metric_name == 'r2_':
+            test_score=r2_score(y_test, best_model.predict(X_test))
 
-        print(f"  {metric_name}: {-test_score if 'neg' in metric_scorer else test_score}")
+        print(
+            f"  {metric_name}: {-test_score if 'neg' in metric_scorer else test_score}")
 
-# prompt: generate a neural network to predict upon this dataset
 
-import numpy as np
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
+    plot_model_diagnostics(best_model, X_test, y_test, f'Prediction graph for {name}')
+    
 
 # Define the Neural Network model
-model = Sequential()
-model.add(Dense(128, input_dim=X_train.shape[1], activation='relu'))
-model.add(Dropout(0.2))
-model.add(Dense(64, activation='relu'))
-model.add(Dropout(0.2))
-model.add(Dense(32, activation='relu'))
-model.add(Dense(1, activation='linear')) # Output layer for regression
+model = keras.Sequential()
+model.add(layers.Dense(128,input_dim=X_train.shape[1] , activation='relu'))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(64, activation='relu'))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(32, activation='relu'))
+model.add(layers.Dense(1, activation='linear'))  # Output layer for regression
 
 # Compile the model
-optimizer = Adam(learning_rate=0.001)
-model.compile(loss='mean_squared_error', optimizer=optimizer, metrics=['mse', 'mae'])
+optimizer = optimizers.Adam(learning_rate=0.001)
+model.compile(loss='mean_squared_error',
+              optimizer=optimizer, metrics=['mse', 'mae'])
 
 # Define Early Stopping callback
-early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+early_stopping = callbacks.EarlyStopping(
+    monitor='val_loss', patience=10, restore_best_weights=True)
 
 # Train the model
-history = model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.2, callbacks=[early_stopping], verbose=0)
+history = model.fit(X_train, y_train, epochs=100, batch_size=32,
+                    validation_split=0.2, callbacks=[early_stopping], verbose=0)
 
 # Evaluate the model
 loss, mse, mae = model.evaluate(X_test, y_test, verbose=0)
 rmse = np.sqrt(mse)
 
-print(f"\n--- Neural Network Evaluation ---")
+print("\n--- Neural Network Evaluation ---")
 print(f"Test Loss: {loss}")
 print(f"Test MSE: {mse}")
 print(f"Test MAE: {mae}")
@@ -379,24 +474,31 @@ predictions = model.predict(X_test)
 
 # prompt: generate a table to compare the results of each ml model
 
-import pandas as pd
 # Store the results in a dictionary
 results = {}
 
 # Iterate through each model and store its test scores
 for name, config in models.items():
-    best_model = search.best_estimator_ # Assuming search object from previous code
+    best_model = search.best_estimator_  # Assuming search object from previous code
     test_scores = {}
     for metric_name, metric_scorer in scoring_metrics.items():
         if metric_name == 'mse':
             test_score = mean_squared_error(y_test, best_model.predict(X_test))
         elif metric_name == 'mae':
-            test_score = mean_absolute_error(y_test, best_model.predict(X_test))
+            test_score = mean_absolute_error(
+                y_test, best_model.predict(X_test))
         elif metric_name == 'rmse':
-            test_score = root_mean_squared_error(y_test, best_model.predict(X_test))
-        else:
-            raise Exception(f"Invalid metric name: {metric_name}")
+            test_score = root_mean_squared_error(
+                y_test, best_model.predict(X_test))
+        elif metric_name == 'r2':
+            test_score=r2_score(y_test, best_model.predict(X_test))
+
+        print(
+            f"  {metric_name}: {-test_score if 'neg' in metric_scorer else test_score}")
+
         test_scores[metric_name] = test_score
+    #plot_model_diagnostics(best_model, X_test, y_test, f'Prediction graph for {name}')
+
     results[name] = test_scores
 
 # Add Neural Network results
@@ -416,24 +518,19 @@ results_df.rename(columns={'mse': 'Mean Squared Error (MSE)',
 
 # Display the table
 print("\n--- Model Comparison Table ---")
-display(results_df)
 
 """##Without PCA"""
 
-from xgboost import XGBRegressor
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.svm import SVR
 
 # prompt: make code for all maching learning algorithms mentioned above, use the halving grid search and display the metric score for each
-from sklearn.metrics import mean_squared_error, mean_absolute_error, root_mean_squared_error
 # explicitly require this experimental feature
-from sklearn.experimental import enable_halving_search_cv # noqa
+from sklearn.experimental import enable_halving_search_cv  # noqa
 # now you can import normally from model_selection
-from sklearn.model_selection import HalvingGridSearchCV
 # Define the models and their parameter grids
 models = {
     'XGBoost': {
-        'model': XGBRegressor(objective='reg:squarederror', random_state=42), # Added tree_method for GPU
+        # Added tree_method for GPU
+        'model': XGBRegressor(objective='reg:squarederror', random_state=42),
         'param_grid': {
             'n_estimators': [100, 200, 300, 400, 500, 600, 700],
             'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3],
@@ -443,7 +540,8 @@ models = {
         }
     },
     'RandomForest': {
-        'model': RandomForestRegressor(random_state=42), # Changed to Regressor
+        # Changed to Regressor
+        'model': RandomForestRegressor(random_state=42),
         'param_grid': {
             'n_estimators': [100, 200, 300, 400, 500, 600, 700],
             'max_depth': [None, 10, 15, 20, 30, 40, 50],
@@ -468,7 +566,7 @@ scoring_metrics = {
     'mae': 'neg_mean_absolute_error',
     'rmse': 'neg_root_mean_squared_error'
 }
-ml_models={}
+ml_models = {}
 # Iterate through each model
 for name, config in models.items():
     print(f"\n--- Training and evaluating {name} ---")
@@ -481,8 +579,9 @@ for name, config in models.items():
         factor=2,
         resource='n_samples',
         min_resources='exhaust',
-        scoring='neg_root_mean_squared_error', # Specify a single scoring metric for refitting
-        refit='neg_root_mean_squared_error' # Refit the model based on RMSE
+        # Specify a single scoring metric for refitting
+        scoring='neg_root_mean_squared_error',
+        refit='neg_root_mean_squared_error'  # Refit the model based on RMSE
     )
 
     # Fit the model
@@ -490,57 +589,63 @@ for name, config in models.items():
 
     # Display the best parameters and the best score (based on refit metric)
     print(f"Best parameters for {name}: {search.best_params_}")
-    print(f"Best RMSE score (from HalvingGridSearchCV) for {name}: {search.best_score_}")
-
+    print(f"Best RMSE score (from HalvingGridSearchCV) for {
+          name}: {search.best_score_}")
 
     # Evaluate on the test set using multiple metrics
     print(f"Test scores for {name}:")
     best_model = search.best_estimator_
-    ml_models[name]=best_model
+    ml_models[name] = best_model
     for metric_name, metric_scorer in scoring_metrics.items():
-        test_score = best_model.score(X_test_no_pca, y_test) # Use the best estimator's score method
+        # Use the best estimator's score method
+        test_score = best_model.score(X_test_no_pca, y_test)
 
         if metric_name == 'mse':
-          test_score = mean_squared_error(y_test, best_model.predict(X_test_no_pca))
+            test_score = mean_squared_error(
+                y_test, best_model.predict(X_test_no_pca))
         elif metric_name == 'mae':
-          test_score = mean_absolute_error(y_test, best_model.predict(X_test_no_pca))
+            test_score = mean_absolute_error(
+                y_test, best_model.predict(X_test_no_pca))
         elif metric_name == 'rmse':
-          test_score = root_mean_squared_error(y_test, best_model.predict(X_test_no_pca))
+            test_score = root_mean_squared_error(
+                y_test, best_model.predict(X_test_no_pca))
+        elif metric_name == 'r2_':
+            test_score=r2_score(y_test, best_model.predict(X_test))
 
-        print(f"  {metric_name}: {-test_score if 'neg' in metric_scorer else test_score}")
+        print(
+            f"  {metric_name}: {-test_score if 'neg' in metric_scorer else test_score}")
 
-# neural network
+    
+    plot_model_diagnostics(best_model, X_test_no_pca, y_test, f'Prediction graph for {name} using no PCA')
 
-import numpy as np
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
+
 
 # Define the Neural Network model
-model = Sequential()
-model.add(Dense(128, input_dim=X_train_no_pca.shape[1], activation='relu'))
-model.add(Dropout(0.2))
-model.add(Dense(64, activation='relu'))
-model.add(Dropout(0.2))
-model.add(Dense(32, activation='relu'))
-model.add(Dense(1, activation='linear')) # Output layer for regression
+model = keras.Sequential()
+model.add(layers.Dense(128,input_dim=X_train.shape[1] , activation='relu'))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(64, activation='relu'))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(32, activation='relu'))
+model.add(layers.Dense(1, activation='linear'))  # Output layer for regression
 
 # Compile the model
-optimizer = Adam(learning_rate=0.001)
-model.compile(loss='mean_squared_error', optimizer=optimizer, metrics=['mse', 'mae'])
+optimizer = optimizers.Adam(learning_rate=0.001)
+model.compile(loss='mean_squared_error',
+              optimizer=optimizer, metrics=['mse', 'mae'])
 
 # Define Early Stopping callback
-early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-
+early_stopping = callbacks.EarlyStopping(
+    monitor='val_loss', patience=10, restore_best_weights=True)
 # Train the model
-history = model.fit(X_train_no_pca, y_train, epochs=100, batch_size=32, validation_split=0.2, callbacks=[early_stopping], verbose=0)
+history = model.fit(X_train_no_pca, y_train, epochs=100, batch_size=32,
+                    validation_split=0.2, callbacks=[early_stopping], verbose=0)
 
 # Evaluate the model
 loss, mse, mae = model.evaluate(X_test_no_pca, y_test, verbose=0)
 rmse = np.sqrt(mse)
 
-print(f"\n--- Neural Network Evaluation ---")
+print("\n--- Neural Network Evaluation ---")
 print(f"Test Loss: {loss}")
 print(f"Test MSE: {mse}")
 print(f"Test MAE: {mae}")
@@ -558,11 +663,14 @@ for name, config in models.items():
     test_scores = {}
     for metric_name, metric_scorer in scoring_metrics.items():
         if metric_name == 'mse':
-            test_score = mean_squared_error(y_test, best_model.predict(X_test_no_pca))
+            test_score = mean_squared_error(
+                y_test, best_model.predict(X_test_no_pca))
         elif metric_name == 'mae':
-            test_score = mean_absolute_error(y_test, best_model.predict(X_test_no_pca))
+            test_score = mean_absolute_error(
+                y_test, best_model.predict(X_test_no_pca))
         elif metric_name == 'rmse':
-            test_score = root_mean_squared_error(y_test, best_model.predict(X_test_no_pca))
+            test_score = root_mean_squared_error(
+                y_test, best_model.predict(X_test_no_pca))
         else:
             raise Exception(f"Invalid metric name: {metric_name}")
         test_scores[metric_name] = test_score
@@ -585,18 +693,12 @@ results_df.rename(columns={'mse': 'Mean Squared Error (MSE)',
 
 # Display the table
 print("\n--- Model Comparison Table ---")
-display(results_df)
 
 # prompt: generate permutation importance graphs for each model
 
-import pandas as pd
-
-from sklearn.inspection import permutation_importance
-import shap
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 # Assuming X_train_no_pca, X_test_no_pca, y_test, and ml_models are defined from the previous code
+
 
 def plot_permutation_importance(model, X_test, y_test, feature_names, model_name):
     """Generates and plots permutation importance for a given model."""
@@ -626,7 +728,8 @@ def plot_permutation_importance(model, X_test, y_test, feature_names, model_name
 
         # Plot top 20
         plt.figure(figsize=(10, 8))
-        sns.barplot(x="importance", y="feature", data=imp_df, palette="viridis")
+        sns.barplot(x="importance", y="feature",
+                    data=imp_df, palette="viridis")
         plt.title(f"Permutation Importance for {model_name}")
         plt.xlabel("Mean Importance (drop in score)")
         plt.ylabel("Feature")
@@ -634,18 +737,22 @@ def plot_permutation_importance(model, X_test, y_test, feature_names, model_name
         plt.show()
 
     except Exception as e:
-        print(f"Could not compute permutation importance for {model_name}: {e}")
+        print(f"Could not compute permutation importance for {
+              model_name}: {e}")
         print("Check that your model implements .predict or .score correctly.")
+
 
 # Generate permutation importance for the trained ML models (without PCA)
 # X_test_no_pca was used for evaluation of these models
-feature_names_no_pca = X.columns # Assuming X is the original feature DataFrame before splitting and scaling
+# Assuming X is the original feature DataFrame before splitting and scaling
+feature_names_no_pca = X.columns
 
 for name, model in ml_models.items():
     # Permutation importance is generally more interpretable with original features
     # However, if the model was trained on scaled data, using scaled test data for importance is appropriate
     # Here we use X_test_no_pca which is the scaled data without PCA
-    plot_permutation_importance(model, X_test_no_pca, y_test, feature_names_no_pca, name)
+    plot_permutation_importance(
+        model, X_test_no_pca, y_test, feature_names_no_pca, name)
 
 # Note: Generating permutation importance for the Neural Network model might require a different approach
 # as Keras models don't have built-in feature importance. SHAP can be used, but requires a different Explainer.
@@ -655,68 +762,73 @@ for name, model in ml_models.items():
 
 combine_df = pd.read_csv('combine_2025.csv')
 
-combine_df = combine_df[combine_df['position'].isin(['QB','WR','RB','FB','TE'])]
-combine_df.dropna(subset=['player','yr'],inplace=True)
+combine_df = combine_df[combine_df['position'].isin(
+    ['QB', 'WR', 'RB', 'FB', 'TE'])]
+combine_df.dropna(subset=['player', 'yr'], inplace=True)
 combine_df['yr'] = combine_df['yr'].astype(int)
-combine_df.reset_index(inplace=True,drop=True)
+combine_df.reset_index(inplace=True, drop=True)
 
 
-combine_df.fillna({'40yd':100, 'Vertical':0, 'Bench':0, 'Broad Jump':0,
-                   '3Cone':100, 'Shuttle':100},inplace=True)
+combine_df.fillna({'40yd': 100, 'Vertical': 0, 'Bench': 0, 'Broad Jump': 0,
+                   '3Cone': 100, 'Shuttle': 100}, inplace=True)
 
 college_df = pd.DataFrame()
 dir = 'cfb_data/'
 for f in os.listdir(dir):
-  if f.endswith('.csv'):
-    year = f.split('.')[0]
-    year = year.split('_')[-1]
-    tmp = pd.read_csv(dir+f)
+    if f.endswith('.csv'):
+        year = f.split('.')[0]
+        year = year.split('_')[-1]
+        tmp = pd.read_csv(dir+f)
 
-    for x in tmp.columns:
-      if 'unnamed' in x.lower():
-        tmp.drop(x,axis=1,inplace=True)
-    tmp = tmp[tmp['player'].isin(combine_df['player'].unique())]
+        for x in tmp.columns:
+            if 'unnamed' in x.lower():
+                tmp.drop(x, axis=1, inplace=True)
+        tmp = tmp[tmp['player'].isin(combine_df['player'].unique())]
 
-    college_df= pd.concat([college_df,tmp])
+        college_df = pd.concat([college_df, tmp])
 # Josh johnson is the only player who would occur for two different people in different positions
 college_df = college_df[college_df['player'] != 'Josh Johnson']
 
 df_total = college_df.groupby(['player']).sum(numeric_only=True)
 df_avg = college_df.groupby(['player']).median(numeric_only=True)
 
-df = combine_df.merge(df_total,on='player',how='left',suffixes=('_combine','_totals'))
-df = df.merge(df_avg,on='player',how='left')
+df = combine_df.merge(df_total, on='player', how='left',
+                      suffixes=('_combine', '_totals'))
+df = df.merge(df_avg, on='player', how='left')
 
-df_final=df.copy()
-#df_final = df_final.dropna(subset=['nfl_score'])
-df_final.reset_index(inplace=True,drop=True)
+df_final = df.copy()
+# df_final = df_final.dropna(subset=['nfl_score'])
+df_final.reset_index(inplace=True, drop=True)
 print(f'the length of the dataframe is- {len(df_final)}')
-
 
 
 # Fill NaNs with empty strings for 'Ht' column before processing
 df_final.loc[:, 'Ht'] = df_final['Ht'].fillna('')
 
-df_final['feet'] = df_final['Ht'].apply(lambda x: int(str(x).split('-')[0]) if isinstance(x, str) and '-' in x else 0)
-df_final['inches'] = df_final['Ht'].apply(lambda x: int(str(x).split('-')[1]) if isinstance(x, str) and '-' in x else 0)
+df_final['feet'] = df_final['Ht'].apply(lambda x: int(
+    str(x).split('-')[0]) if isinstance(x, str) and '-' in x else 0)
+df_final['inches'] = df_final['Ht'].apply(lambda x: int(
+    str(x).split('-')[1]) if isinstance(x, str) and '-' in x else 0)
 df_final['feet_in_cm'] = df_final['feet'] * 30.48
 df_final['inches_in_cm'] = df_final['inches'] * 2.54
 df_final['Ht'] = df_final['feet_in_cm'] + df_final['inches_in_cm']
 
-df_final.drop(['feet','inches','feet_in_cm','inches_in_cm'],axis=1,inplace=True)
+df_final.drop(['feet', 'inches', 'feet_in_cm',
+              'inches_in_cm'], axis=1, inplace=True)
 encoder = OrdinalEncoder()
 df_final['school'] = encoder.fit_transform(df_final[['school']])
 # One-Hot Encode the 'position' column
-df_final = pd.get_dummies(df_final, columns=['position'], prefix='position', dummy_na=0)
-df_final['position_FB']=0
+df_final = pd.get_dummies(
+    df_final, columns=['position'], prefix='position', dummy_na=0)
+df_final['position_FB'] = 0
 
-player= df_final['player']
+player = df_final['player']
 team = df_final['tm']
 
-df_final.drop(['player'],axis=1,inplace=True)
-df_final.drop(['tm'],axis=1,inplace=True)
-df_final.drop(['yr'],axis=1,inplace=True)
-df_final.fillna(0,inplace=True)
+df_final.drop(['player'], axis=1, inplace=True)
+df_final.drop(['tm'], axis=1, inplace=True)
+df_final.drop(['yr'], axis=1, inplace=True)
+df_final.fillna(0, inplace=True)
 
 # Normalize the data
 scaler = MinMaxScaler()
@@ -727,24 +839,22 @@ predictions = ml_models['XGBoost'].predict(pred_data)
 
 
 result_df = pd.DataFrame(player)
-result_df['Team']=team
-result_df['pred_score']=predictions
-display(result_df.sort_values('pred_score',ascending=False))
+result_df['Team'] = team
+result_df['pred_score'] = predictions
 
 """Predicting data on extreme values"""
 
-display(df_extremes)
-#player= df_extremes['player']
+# player= df_extremes['player']
 
 
-#team = df_extremes['tm']
-#nfl_scores = df_extremes['nfl_score']
+# team = df_extremes['tm']
+# nfl_scores = df_extremes['nfl_score']
 
-#df_extremes.drop(['player'],axis=1,inplace=True)
-df_extremes.drop(['yr'],axis=1,inplace=True)
-#df_extremes.drop(['tm'],axis=1,inplace=True)
-#df_extremes.drop(['nfl_score'],axis=1,inplace=True)
-df_extremes.fillna(0,inplace=True)
+# df_extremes.drop(['player'],axis=1,inplace=True)
+df_extremes.drop(['yr'], axis=1, inplace=True)
+# df_extremes.drop(['tm'],axis=1,inplace=True)
+# df_extremes.drop(['nfl_score'],axis=1,inplace=True)
+df_extremes.fillna(0, inplace=True)
 
 # Normalize the data
 scaler = MinMaxScaler()
@@ -755,11 +865,10 @@ predictions = ml_models['XGBoost'].predict(pred_data)
 
 
 result_df = pd.DataFrame(player)
-result_df['Team']=team
-result_df['nfl_score']=nfl_scores
-result_df['pred_score']=predictions
+result_df['Team'] = team
+result_df['nfl_score'] = nfl_scores
+result_df['pred_score'] = predictions
 
-display(result_df)
 
 """#test
 
@@ -797,17 +906,9 @@ Accuracy Score: `0.902`
 Accuracy Score: `0.997`
 """
 
-from sklearn.ensemble import RandomForestClassifier
-import numpy as np
-import pandas as pd
 # explicitly require this experimental feature
-from sklearn.experimental import enable_halving_search_cv # noqa
+from sklearn.experimental import enable_halving_search_cv  # noqa
 # now you can import normally from model_selection
-from sklearn.model_selection import HalvingGridSearchCV
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
-from xgboost import XGBRegressor,XGBClassifier
 
 
 df = pd.read_csv('/content/nfl_rookie_data.csv', index_col=0)
@@ -815,7 +916,8 @@ df = pd.read_csv('/content/nfl_rookie_data.csv', index_col=0)
 X = df.drop('nfl_score', axis=1)
 y = df['nfl_score']
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
 
 
 # Normalize the data
@@ -833,9 +935,9 @@ cutoff = np.quantile(y_train, 0.75)
 high_scorer = (y_train >= cutoff).astype(int)
 
 # XGBoost base model
-xgb_classifier = XGBClassifier(colsample_bytree= 1.0,
-                                learning_rate= 0.07, max_depth= 8,
-                                n_estimators= 100, subsample= 0.6,random_state=42)
+xgb_classifier = XGBClassifier(colsample_bytree=1.0,
+                               learning_rate=0.07, max_depth=8,
+                               n_estimators=100, subsample=0.6, random_state=42)
 
 
 # Best XGBoost parameters: {'colsample_bytree': 1.0, 'learning_rate': 0.07, 'max_depth': 8, 'n_estimators': 100, 'subsample': 0.6}
@@ -843,7 +945,7 @@ xgb_classifier.fit(X_train_no_pca, high_scorer)
 
 # Get predictions to feed into neural net
 xgb_train_preds = xgb_classifier.predict(X_train_no_pca).reshape(-1, 1)
-xgb_test_preds  = xgb_classifier.predict(X_test_no_pca).reshape(-1, 1)
+xgb_test_preds = xgb_classifier.predict(X_test_no_pca).reshape(-1, 1)
 
 print('---------------------------------------')
 print('Now estimating the score using NN:\n\n')
@@ -851,10 +953,9 @@ print('Now estimating the score using NN:\n\n')
 X_nn_train = np.hstack([X_train_no_pca, xgb_train_preds])
 X_nn_test = np.hstack([X_test_no_pca, xgb_test_preds])
 
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 # Create HalvingGridSearchCV object
-xgb_reg =XGBRegressor(random_state=42)
+xgb_reg = XGBRegressor(random_state=42)
 
 param_grid = {
     'n_estimators': [50, 100, 200, 500],
@@ -879,17 +980,17 @@ search = HalvingGridSearchCV(xgb_reg,
                              min_resources='exhaust',
                              scoring='neg_root_mean_squared_error',
                              random_state=42
-)
+                             )
 
 # Fit the model
 search.fit(X_nn_train, y_train)
 
 # Get the best parameters
-best_params = grid_search.best_params_
+best_params = search.best_params_
 print("Best parameters found: ", best_params)
 
 # Get the best estimator
-best_estimator = grid_search.best_estimator_
+best_estimator = search.best_estimator_
 print("Best estimator: ", best_estimator)
 
 # Predict on the test set
@@ -913,20 +1014,9 @@ results = pd.DataFrame({
 # Print the results
 print(results)
 
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import pandas as pd
 # explicitly require this experimental feature
 from sklearn.experimental import enable_halving_search_cv  # noqa
 # now you can import normally from model_selection
-from sklearn.model_selection import HalvingGridSearchCV, HalvingRandomSearchCV
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
-from xgboost import XGBRegressor, XGBClassifier
-import scipy.stats as st
 
 # Create HalvingGridSearchCV object
 xgb_reg = XGBRegressor(random_state=42)
@@ -1068,23 +1158,12 @@ plt.grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import pandas as pd
 # explicitly require this experimental feature
 from sklearn.experimental import enable_halving_search_cv  # noqa
 # now you can import normally from model_selection
-from sklearn.model_selection import HalvingGridSearchCV, HalvingRandomSearchCV
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
-from xgboost import XGBRegressor, XGBClassifier
-import scipy.stats as st
 
 # Create HalvingGridSearchCV object
-xgb_reg =XGBRegressor(random_state=42)
+xgb_reg = XGBRegressor(random_state=42)
 
 # Grid around the best parameters
 param_grid = {
@@ -1111,7 +1190,7 @@ search = HalvingGridSearchCV(xgb_reg,
                              verbose=1,
                              n_jobs=-1,
                              aggressive_elimination=True
-)
+                             )
 
 # Fit the model
 search.fit(X_nn_train, y_train)
@@ -1203,9 +1282,12 @@ plt.tight_layout()
 plt.show()
 
 # Wrap the NN as a scikit-learn estimator
+
+
 def create_model(dropout_rate=0.3, hidden_size=64, learning_rate=0.001):
     model = Sequential([
-        Dense(hidden_size, activation='relu', input_shape=(X_nn_train.shape[1],)),
+        Dense(hidden_size, activation='relu',
+              input_shape=(X_nn_train.shape[1],)),
         Dropout(dropout_rate),
         Dense(int(hidden_size / 2), activation='relu'),
         Dense(1)
@@ -1214,9 +1296,6 @@ def create_model(dropout_rate=0.3, hidden_size=64, learning_rate=0.001):
     model.compile(optimizer=optimizer, loss='mean_squared_error')
     return model
 
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.optimizers import Adam
 
 nn = Sequential([
     Dense(64, activation='relu', input_shape=(X_nn_train.shape[1],)),
@@ -1231,7 +1310,8 @@ nn.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
 X_top_train = X_nn_train[high_scorer == 1]
 y_top_train = y_train[high_scorer == 1]
 
-nn.fit(X_top_train, y_top_train, epochs=512, batch_size=32, validation_split=0.1)
+nn.fit(X_top_train, y_top_train, epochs=512,
+       batch_size=32, validation_split=0.1)
 
 nn.fit(X_nn_train, y_train)
 nn_preds_train = nn.predict(X_nn_train).flatten()
@@ -1241,12 +1321,12 @@ print(nn_preds_test)
 
 print(nn_preds_test)
 df2 = pd.DataFrame(play)
-#df2['Team']=tm
-df2['nfl_score']=y_test
+# df2['Team']=tm
+df2['nfl_score'] = y_test
 
-df2.dropna(subset=['nfl_score'],inplace=True)
-df2['pred_score']=nn_preds_test
-display(df2)
+df2.dropna(subset=['nfl_score'], inplace=True)
+df2['pred_score'] = nn_preds_test
+
 
 # Predict with best XGBoost model
 xgb_preds_new = best_xgb_model.predict(X_new).reshape(-1, 1)
@@ -1262,9 +1342,8 @@ nn_preds_new = best_nn_model.predict(X_nn_new[top_flags_new == 1]).flatten()
 final_preds_new = xgb_preds_new.flatten()
 final_preds_new[top_flags_new == 1] = nn_preds_new
 
-import matplotlib.pyplot as plt
 
-plt.figure(figsize=(8,6))
+plt.figure(figsize=(8, 6))
 plt.scatter(y_new_true, final_preds_new, alpha=0.6, color='teal')
 plt.plot([0, max(y_new_true)], [0, max(y_new_true)], 'r--')  # ideal line
 plt.xlabel("True Median NFL Fantasy Score")
@@ -1273,9 +1352,11 @@ plt.title("Predicted vs True Scores")
 plt.grid(True)
 plt.show()
 
-plt.figure(figsize=(8,6))
-plt.hist(final_preds_new[y_new_true > 15], bins=20, alpha=0.7, color='purple', label='Predicted')
-plt.hist(y_new_true[y_new_true > 15], bins=20, alpha=0.5, color='orange', label='Actual')
+plt.figure(figsize=(8, 6))
+plt.hist(final_preds_new[y_new_true > 15], bins=20,
+         alpha=0.7, color='purple', label='Predicted')
+plt.hist(y_new_true[y_new_true > 15], bins=20,
+         alpha=0.5, color='orange', label='Actual')
 plt.title("High Scorer Distribution (True > 15)")
 plt.xlabel("Fantasy Score")
 plt.ylabel("Count")
@@ -1283,7 +1364,7 @@ plt.legend()
 plt.show()
 
 residuals = y_new_true - final_preds_new
-plt.figure(figsize=(8,6))
+plt.figure(figsize=(8, 6))
 plt.scatter(final_preds_new, residuals, alpha=0.6, color='darkgreen')
 plt.axhline(0, color='red', linestyle='--')
 plt.xlabel("Predicted Score")
@@ -1292,28 +1373,23 @@ plt.title("Residuals vs Predictions")
 plt.grid(True)
 plt.show()
 
-!pip install scikeras>=0.13.0
-
 """#test 2 - 2 stage model"""
 
-from sklearn.ensemble import RandomForestClassifier
-import numpy as np
 # explicitly require this experimental feature
-from sklearn.experimental import enable_halving_search_cv # noqa
+from sklearn.experimental import enable_halving_search_cv  # noqa
 # now you can import normally from model_selection
-from sklearn.model_selection import HalvingGridSearchCV
 
 # Define high scorer threshold (e.g., top 25%)
 cutoff = np.quantile(y_train, 0.75)
 high_scorer = (y_train >= cutoff).astype(int)
 
-param_grid= {
-            'n_estimators': [100, 200, 300, 400, 500, 600, 700],
-            'max_depth': [None, 10, 15, 20, 30, 40, 50],
-            'min_samples_split': [2, 5, 10, 20],
-            'min_samples_leaf': [1, 2, 4, 8],
-            'bootstrap': [True, False]
-        }
+param_grid = {
+    'n_estimators': [100, 200, 300, 400, 500, 600, 700],
+    'max_depth': [None, 10, 15, 20, 30, 40, 50],
+    'min_samples_split': [2, 5, 10, 20],
+    'min_samples_leaf': [1, 2, 4, 8],
+    'bootstrap': [True, False]
+}
 
 # Train classifier
 clf = RandomForestClassifier(n_estimators=150, max_depth=8, random_state=42)

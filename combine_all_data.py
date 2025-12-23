@@ -246,7 +246,10 @@ df_avg = df_avg.loc[:, ~df_avg.columns.str.contains('tot_')]
 df_avg.drop(['total__rush_rec_tds'], axis=1, inplace=True)
 
 # Merge combine and college data
-df = combine_df.merge(df_total, on='player', how='left').merge(df_avg, on='player', how='left')
+df = combine_df.merge(df_total, on='player', how='left', 
+                      suffixes=('_combine', '_totals'))
+
+df= df.merge(df_avg, on='player', how='left', suffixes=('_total', '_avg'))
 
 # Process NFL rookie data
 nfl_rookie_df = pd.DataFrame()

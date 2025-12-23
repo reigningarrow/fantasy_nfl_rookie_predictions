@@ -15,13 +15,16 @@ Author: SHB6
 Created: 17 Dec 2025
 """
 
+from keras import layers, callbacks, optimizers
+import smogn
+import keras
 import pandas as pd
 from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.decomposition import PCA
 from sklearn.experimental import enable_halving_search_cv  # noqa Required for HalvingGridSearchCV
 from sklearn.model_selection import HalvingGridSearchCV
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, root_mean_squared_error
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
@@ -31,8 +34,6 @@ import logging
 import numpy as np
 import os
 os.environ["KERAS_BACKEND"] = "torch"
-import keras
-from keras import layers, callbacks,optimizers
 
 # -----------------------------
 # Configuration
@@ -91,7 +92,8 @@ def encode_features(df: pd.DataFrame) -> pd.DataFrame:
     df['school'] = encoder.fit_transform(df[['school']])
 
     # One-hot encode 'position'
-    df = pd.get_dummies(df, columns=['position'], prefix='position', dummy_na=False)
+    df = pd.get_dummies(df, columns=['position'],
+                        prefix='position', dummy_na=False)
 
     log_and_print("Encoded 'school' and 'position' columns.")
     return df
@@ -112,27 +114,107 @@ def handle_missing_values(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def split_and_scale(df: pd.DataFrame, target_col: str):
+def plot_target_distribution(y_before, y_after, target_col: str):
     """
-    Split data into training and test sets and apply MinMax scaling.
+    Plot target distribution before and after SMOGN/SMOTER augmentation.
 
     Args:
-        df (pd.DataFrame): Input DataFrame.
+        y_before (pd.Series): Original training target values.
+        y_after (pd.Series): Augmented training target values.
         target_col (str): Name of the target column.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+
+    # Plot original distribution
+    axes[0].hist(y_before, bins=30, color='skyblue', edgecolor='black')
+    axes[0].set_title(f"{target_col} Distribution (Before Augmentation). Length- {len(y_before)}")
+    axes[0].set_xlabel(target_col)
+    axes[0].set_ylabel("Frequency")
+
+    # Plot augmented distribution
+    axes[1].hist(y_after, bins=30, color='salmon', edgecolor='black')
+    axes[1].set_title(f"{target_col} Distribution (After Augmentation). Length- {len(y_after)}")
+    axes[1].set_xlabel(target_col)
+    axes[1].set_ylabel("Frequency")
+
+    plt.show()
+    
+
+def split_and_scale(df: pd.DataFrame, target_col: str, augment: bool = False):
+    """
+    Split a dataset into training and test sets, optionally apply regression-oriented
+    data augmentation using SMOGN/SMOTER, and scale features with MinMaxScaler.
+
+    This function is designed for regression tasks where the target variable may have
+    imbalanced distributions (e.g., rare or extreme values). If `augment=True`, the
+    training set is oversampled using SMOGN/SMOTER to generate synthetic samples for
+    underrepresented target ranges. After augmentation, all features are scaled to
+    the [0, 1] range using MinMaxScaler.
+
+    Args:
+        df (pd.DataFrame): Input DataFrame containing features and target.
+        target_col (str): Name of the target column in `df`.
+        augment (bool, optional): Whether to apply SMOGN/SMOTER augmentation to the
+            training set. Defaults to False. If True, synthetic samples are generated
+            to balance extreme target values.
 
     Returns:
-        tuple: (X_train_scaled, X_test_scaled, y_train, y_test, scaler)
+        tuple:
+            - X_train_scaled (np.ndarray): Scaled training features.
+            - X_test_scaled (np.ndarray): Scaled test features.
+            - y_train (pd.Series): Training target values (augmented if `augment=True`).
+            - y_test (pd.Series): Test target values (unaltered).
+            - scaler (MinMaxScaler): Fitted scaler object for transforming new data.
     """
+    # Separate features (X) and target (y)
     X = df.drop(target_col, axis=1)
     y = df[target_col]
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Perform train/test split (80% train, 20% test)
+    # random_state ensures reproducibility
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
+    if augment is True:
+        # Recombine features and target into a single DataFrame for SMOGN
+        train_df = X_train.copy()
+        train_df[target_col] = y_train.values
+
+        # Reset index to avoid misalignment issues during oversampling
+        train_df = train_df.reset_index(drop=True)
+
+        # Apply SMOGN/SMOTER augmentation
+        # - k: number of nearest neighbors used to generate synthetic samples
+        # - samp_method='extreme': oversample only extreme target values or balance
+        # - rel_thres, rel_xtrm_type, rel_coef: control relevance function for extremes
+        train_aug = smogn.smoter(
+            data=train_df,
+            y=target_col,
+            k=min(5, len(train_df) - 1),  # ensure k is valid
+            samp_method='extreme',
+            rel_thres=0.80,
+            rel_xtrm_type='high',
+            rel_coef=2.25,
+            rel_method='auto'
+        )
+        y_train_original = y_train.copy()
+        # apply augmentation...
+
+        # Separate augmented features and target
+        X_train = train_aug.drop(target_col, axis=1)
+        y_train = train_aug[target_col]
+        plot_target_distribution(y_train_original, y_train, target_col)
+    # Initialize MinMaxScaler (scales features to [0, 1])
     scaler = MinMaxScaler()
+
+    # Fit scaler on training data and transform both train and test sets
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    log_and_print("Split data and applied MinMax scaling.")
+    # Log progress for debugging/monitoring
+    log_and_print("Split data, applied SMOGN augmentation, and MinMax scaling.")
+
     return X_train_scaled, X_test_scaled, y_train, y_test, scaler
 
 
@@ -151,7 +233,8 @@ def apply_pca(X_train, X_test, variance_threshold=0.95):
     pca = PCA(variance_threshold)
     pca.fit(X_train)
 
-    log_and_print(f"PCA applied. Number of components retained: {pca.n_components_}")
+    log_and_print(f"PCA applied. Number of components retained: {
+                  pca.n_components_}")
     return pca.transform(X_train), pca.transform(X_test), pca
 
 
@@ -176,11 +259,14 @@ def plot_model_diagnostics(model, X_test, y_test, title: str):
     """
     # Predictions and residuals
     y_pred = model.predict(X_test)
+    # If it's (n_samples, 1), flatten it:
+    if y_pred.ndim > 1 and y_pred.shape[1] == 1:
+        y_pred = y_pred.ravel()
     errors = y_pred - y_test
 
     # Compute metrics
     r2 = r2_score(y_test, y_pred)
-    rmse = mean_squared_error(y_test, y_pred, squared=False)
+    rmse = root_mean_squared_error(y_test, y_pred)
 
     log_and_print(f"Diagnostics for {title}: R²={r2:.4f}, RMSE={rmse:.4f}")
 
@@ -223,11 +309,12 @@ def plot_model_diagnostics(model, X_test, y_test, title: str):
     ax2.set_ylabel("Frequency")
     ax2.grid(True)
 
-    plt.tight_layout()
+    fig.tight_layout()
+    plt.show()
 
 
 def neural_net(X_train, y_train, X_test, y_test,
-               epochs: int = 200, batch_size: int = 32, learning_rate: float = 0.001):
+               epochs: int = 512, batch_size: int = 32, learning_rate: float = 0.002):
     """
     Build, train, and evaluate a feedforward neural network for regression tasks.
 
@@ -254,26 +341,31 @@ def neural_net(X_train, y_train, X_test, y_test,
     """
     # Define the Neural Network model
     model = keras.Sequential([
-        layers.Dense(128, input_dim=X_train.shape[1], activation='relu'),
+        layers.Dense(64, input_dim=X_train.shape[1], activation='relu'),
         layers.Dropout(0.2),
-        layers.Dense(64, activation='relu'),
+        layers.Dense(128, activation='leaky_relu'),
         layers.Dropout(0.2),
-        layers.Dense(32, activation='relu'),
+        layers.Dense(64, activation='leaky_relu'),
+        layers.Dropout(0.2),
+        layers.Dense(32, activation='leaky_relu'),
         layers.Dense(1, activation='linear')  # Output layer for regression
     ])
 
     # Compile the model
     optimizer = optimizers.Adam(learning_rate=learning_rate)
-    model.compile(loss='mean_squared_error', optimizer=optimizer, metrics=['mse', 'mae'])
+    model.compile(loss='mean_squared_error',
+                  optimizer=optimizer, metrics=['mse', 'mae'])
 
     # Define callbacks
-    early_stopping = callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-    reduce_lr = callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5,
+    early_stopping = callbacks.EarlyStopping(
+        monitor='val_loss', patience=50, restore_best_weights=True)
+    reduce_lr = callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.25, patience=15,
                                             min_lr=1e-6, verbose=1)
 
-    log_and_print("Training Neural Network with EarlyStopping and ReduceLROnPlateau...")
+    log_and_print(
+        "Training Neural Network with EarlyStopping and ReduceLROnPlateau...")
     # Train the model
-    history = model.fit(
+    model.fit(
         X_train, y_train,
         epochs=epochs,
         batch_size=batch_size,
@@ -298,7 +390,8 @@ def neural_net(X_train, y_train, X_test, y_test,
 
     return model
 
-def train_and_evaluate_models(X_train, y_train, X_test, y_test,pca=False):
+
+def train_and_evaluate_models(X_train, y_train, X_test, y_test, pca=False):
     """
     Train multiple ML models using HalvingGridSearchCV and evaluate them.
 
@@ -320,11 +413,11 @@ def train_and_evaluate_models(X_train, y_train, X_test, y_test,pca=False):
         'XGBoost': {
             'model': XGBRegressor(objective='reg:squarederror', random_state=42),
             'param_grid': {
-                'n_estimators': [100, 200, 300],
-                'learning_rate': [0.01, 0.05, 0.1],
-                'max_depth': [3, 5, 7],
-                'subsample': [0.6, 0.8, 1.0],
-                'colsample_bytree': [0.6, 0.8, 1.0]
+                'n_estimators': [100, 200, 300, 400, 500],
+                'learning_rate': [0.01, 0.025, 0.05, 0.1],
+                'max_depth': [2, 3, 4, 5, 7],
+                'subsample': [0.4, 0.5, 0.6, 0.8, 1.0],
+                'colsample_bytree': [0.4, 0.5, 0.6, 0.8, 1.0]
             }
         },
         'RandomForest': {
@@ -340,18 +433,18 @@ def train_and_evaluate_models(X_train, y_train, X_test, y_test,pca=False):
         'SVR': {
             'model': SVR(),
             'param_grid': {
-                'C': [0.1, 1, 10],
-                'epsilon': [0.01, 0.1, 0.2],
+                'C': [0.1, 1, 10, 100],
+                'epsilon': [0.01, 0.1, 0.2, 0.4, 0.5],
                 'kernel': ['linear', 'rbf']
             }
         }
     }
 
     scoring_metrics = {
-        'mse': mean_squared_error,
-        'mae': mean_absolute_error,
-        'rmse': lambda y_true, y_pred: mean_squared_error(y_true, y_pred, squared=False),
-        'r2': r2_score
+        'mse': lambda y_true, y_pred: mean_squared_error(y_true, y_pred),
+        'mae': lambda y_true, y_pred: mean_absolute_error(y_true, y_pred),
+        'rmse': lambda y_true, y_pred: root_mean_squared_error(y_true, y_pred),
+        'r2': lambda y_true, y_pred: r2_score(y_true, y_pred)
     }
 
     for name, config in models.items():
@@ -381,11 +474,12 @@ def train_and_evaluate_models(X_train, y_train, X_test, y_test,pca=False):
         for metric_name, metric_func in scoring_metrics.items():
             score = metric_func(y_test, y_pred)
             log_and_print(f"  {metric_name}: {score:.4f}")
+
         if pca is True:
-            title= f'Prediction graph for {name} with PCA'
+            title = f'Prediction graph for {name} with PCA'
         elif pca is False:
-            title= f'Prediction graph for {name} without PCA'
-        plot_model_diagnostics(best_model, X_test, y_test, title )
+            title = f'Prediction graph for {name} without PCA'
+        plot_model_diagnostics(best_model, X_test, y_test, title)
 
 
 # -----------------------------
@@ -411,27 +505,34 @@ def main(df_final: pd.DataFrame):
     df_final = handle_missing_values(df_final)
 
     # Save processed data
-    df_final.to_csv('nfl_rookie_data.csv', index=False)
-    log_and_print("Saved processed data to 'nfl_rookie_data.csv'.")
+    df_final.to_csv('nfl_rookie_data_processed.csv', index=False)
+    log_and_print("Saved processed data to 'nfl_rookie_data_processed.csv'.")
 
     # Split and scale
-    X_train, X_test, y_train, y_test, scaler = split_and_scale(df_final, target_col='nfl_score')
+    X_train, X_test, y_train, y_test, scaler = split_and_scale(
+        df_final, target_col='nfl_score',augment=False)
 
     # Apply PCA
-    X_train_pca, X_test_pca, pca_model = apply_pca(X_train, X_test)
+    #X_train_pca, X_test_pca, pca_model = apply_pca(X_train, X_test)
 
     # Train and evaluate models
-    train_and_evaluate_models(X_train_pca, y_train, X_test_pca, y_test,pca=True)
-    train_and_evaluate_models(X_train, y_train, X_test, y_test,pca=False)
+    #train_and_evaluate_models(X_train_pca, y_train,
+    #                          X_test_pca, y_test, pca=True)
     
-    nn_model_pca = neural_net(X_train_pca, y_train, X_test_pca, y_test)
+    train_and_evaluate_models(X_train, y_train, X_test, y_test,pca=False)
+
+    # nn_model_pca = neural_net(X_train_pca, y_train, X_test_pca, y_test)
     nn_model = neural_net(X_train, y_train, X_test, y_test)
 
-    plot_model_diagnostics(nn_model_pca, X_test_pca, y_test, 'Prediction graph for NN with PCA')
-    plot_model_diagnostics(nn_model, X_test, y_test, 'Prediction graph for NN with PCA')
+    # plot_model_diagnostics(nn_model_pca, X_test_pca, y_test, 'Prediction graph for NN with PCA')
+    plot_model_diagnostics(nn_model, X_test, y_test,
+                           'Prediction graph for NN without PCA')
+
 
 # Example usage:
-if __name__=='__main__':
-    df = pd.read_csv('college_and_nfl_dataset.csv')
-    main(df)
+if __name__ == '__main__':
+    df = pd.read_csv('college_and_nfl_dataset.csv', index_col=0)
+    player_name = df[['player']]
 
+    df_ml = df.drop(['player'], axis=1)
+    main(df_ml)

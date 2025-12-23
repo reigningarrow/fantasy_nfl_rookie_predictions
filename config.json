@@ -1,0 +1,14 @@
+{
+  "start_year": 2000,
+  "end_year": 2023,
+  "month_range": [8, 9, 10, 11, 12],
+  "day_range": [1, 8, 15, 22, 29],
+  "min_sleep": 2,
+  "max_sleep": 30,
+  "season_sleep_min": 5,
+  "season_sleep_max": 20,
+  "max_concurrent": 5,
+  "stream_to_csv": false,
+  "csv_output": "CFB_data.csv",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
+}
